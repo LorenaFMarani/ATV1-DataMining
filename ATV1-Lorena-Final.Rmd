@@ -1,0 +1,322 @@
+---
+title: "ATV1 - Classification using Tidymodels"
+output: html_notebook
+---
+
+Carregando pacotes necessários
+
+```{r}
+here::i_am("DM-1710/SCRIPT-R-notebook.Rmd")
+
+library(here)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(rpart)
+
+```
+Leitura do arquivo
+
+```{r}
+dados <- read_csv2("dados.csv")
+
+head(dados)
+
+#excluindo linhas com valores inexistentes
+na.omit(dados)
+
+#excluindo colunas irrelevantes para este contexto
+dados<-dados[,-c(12:23)]
+
+#transformando o campo ano em date
+dados$aeronave_ano_fabricacao <- as.Date(dados$aeronave_ano_fabricacao, "%Y")
+
+
+glimpse(dados)
+
+```
+
+
+Explorando os dados: Exibindo graficamente as fatalidades por tipo de motor, no momento da decolagem
+```{r}
+
+dados %>% 
+filter(aeronave_fase_operacao == "DECOLAGEM")|>
+filter(is.na(aeronave_motor_tipo) == FALSE) |>
+filter(is.na(aeronave_fase_operacao) == FALSE)%>% 
+ggplot(aes(x = aeronave_motor_tipo, y = aeronave_fatalidades_total),
+show.legend = FALSE) +
+geom_col(fill = "purple", width = 0.5) +
+xlab("TIPO DE MOTOR") +
+ylab("FATALIDADES") +
+ggtitle("DECOLAGEM") +
+ggeasy::easy_center_title() +
+theme_bw() +
+coord_flip()
+
+```
+Exibindo graficamente as fatalidades por tipo de veículo e operação nos aviões da EMBRAER
+```{r}
+dados %>% 
+filter(aeronave_fabricante == "EMBRAER") %>% 
+ggplot(aes(x = aeronave_fatalidades_total, y = aeronave_fase_operacao))+
+geom_line(size=4)+
+theme_bw() +
+ggtitle("EMBRAER") +
+ylab("OPERAÇÃO") +
+xlab("MORTES")
+```
+
+Outras visualizações
+```{r}
+
+
+glimpse(dados)
+table(dados$aeronave_fatalidades_total)   #número de mortes (coluna de cima) por ocorrências
+
+```
+
+```{r}
+#Total de óbitos
+total <-sum(dados$aeronave_fatalidades_total)
+total
+
+```
+
+```{r}
+#Total de óbitos por fabricante da aeronave
+fatal_fabri <- group_by(dados,aeronave_fabricante)%>%summarise(Total=sum(aeronave_fatalidades_total))
+fatal_fabri
+
+
+```
+
+```{r}
+#Total de óbitos por tipo de motor da aeronave
+fatal_motor <- group_by(dados,aeronave_motor_tipo)%>%summarise(Total=sum(aeronave_fatalidades_total))
+
+
+
+```
+
+```{r}
+#Total de Acidentes Fatais por fase da operação
+table(dados[,9])
+```
+
+Transformando os dados
+```{r}
+#A base de dados exibe a quantidade de vítimas e, para a classificação, a variável y deverá ser binária
+dados$aeronave_fatalidades_total[dados$aeronave_fatalidades_total>=1]<-"TRUE"
+dados$aeronave_fatalidades_total[dados$aeronave_fatalidades_total==0]<-"FALSE"
+
+#As variáveis independentes devem ser fatores, que denotam níveis para classificação
+dados<-mutate(dados,across("aeronave_tipo_veiculo":"aeronave_modelo",as_factor))
+dados<-mutate(dados,across("aeronave_motor_tipo":"aeronave_nivel_dano",as_factor))
+dados<-mutate(dados,across("aeronave_ano_fabricacao":"aeronave_assentos",as.numeric))
+dados$aeronave_fatalidades_total<-as_factor(dados$aeronave_fatalidades_total)
+glimpse(dados)
+
+
+```
+
+Preparação dos dados - Split e balanceamento
+``
+```{r}
+
+data_split<- initial_split(dados,prop = 0.8)
+dados_treino <- training(data_split)
+
+table(dados$aeronave_fatalidades_total)
+table(dados_treino$aeronave_fatalidades_total)
+
+#conferindo a proporção de 80% para analisar se o split está balanceado
+
+#original -> 0.07397836
+458/(5733+458)
+
+#dados splitados -> 0.07512116
+372/(4580+372)
+
+#valores similares, ok
+
+```
+Derivação de uma árvore:
+```{r}
+
+#montando a receita
+preparacao<- recipe(aeronave_fatalidades_total ~ ., data = dados_treino)
+
+#escolhendo a arquitetura e a engine
+modelo<- decision_tree() |>
+     set_engine("rpart") |> 
+     set_mode("classification")
+       
+#definindo o fluxo de processamento
+fluxo <- workflow(preparacao,modelo)
+
+#Preprocessor: Recipe
+#Model: decision_tree()
+
+```
+
+
+Aplicando o modelo na base de dados escolhida - Treino
+```{r}
+
+fit_modelo <- fit(fluxo,dados_treino)
+
+fit_modelo
+
+
+#*******************************************RESULTADOS TREINO**************
+#Registros de treino:4952
+#Erros:377 - ou seja, 377 ocorrências terminaram em acidentes fatais
+#Valor predominante(predição) = False, ou seja, sem fatalidade
+#Probabilidade de classificar corretamente: 92%
+#Probabilidade de classificar incorretamente: 0.07%
+#STUMP - O REGRAS 1 DIVISÃO (NÓ)
+#**************************************************************************
+
+
+```
+
+Aplicando o modelo na base de dados escolhida - Teste - e Analisando o resultado
+
+```{r}
+
+dados_teste <-testing(data_split)
+dados_teste
+
+glimpse(dados_teste)
+
+
+#Métricas
+result_teste <- predict(fit_modelo, dados_teste) #mesma coisa do treino
+result_teste <-mutate(result_teste, aeronave_fatalidades_total = dados_teste$aeronave_fatalidades_total)
+result_teste |> metrics(aeronave_fatalidades_total, .pred_class)  #94% de acurácia
+
+result_teste
+
+#*******************************************RESULTADOS TESTE**************
+
+#accuracy	0.95
+#kap	0.58
+
+#*************************************************************************
+
+```
+
+
+Teste com Hiperparâmetros (configurados manualmente)
+```{r}
+
+modelo_hiperp<- decision_tree( 
+     cost_complexity = 2, #modelo mais simples possÍvel, seguindo a Navalha de Ockam
+     tree_depth = 3, #distancia máxima do topo aos nós finais
+     min_n = 20)|> #minimo de exemploares em um nó para efetuar a dividir
+     set_engine("rpart") |> 
+     set_mode("classification")
+
+
+
+#Adaptando o fluxo
+fluxo <- workflow(preparacao,modelo_hiperp)
+
+#Aplicando o modelo
+fit_modelo_hiperp <- fit(fluxo,dados_teste)
+dados_teste_hiperp <-testing(data_split)
+
+dados_teste_hiperp
+
+#obtendo resultados
+result_teste_hiperp <- predict(fit_modelo_hiperp, dados_teste)
+result_teste_hiperp <-mutate(result_teste_hiperp, aeronave_fatalidades_total = dados_teste$aeronave_fatalidades_total)
+result_teste_hiperp |> metrics(aeronave_fatalidades_total, .pred_class)  #94% de acurácia
+
+#***********************RESULTADOS TESTE COM HIPERPARÂMETROS**************
+
+#accuracy	0.9305892		
+#kap	0.0000000	
+
+#*************************************************************************
+```
+
+
+Utilizando validação cruzada e resample
+```{r}
+
+crossval <- vfold_cv(dados_treino, v = 5) #5 é a divisão de subgrupos amostrais. Quanto maior o número de folds, mais dados para treino e menos para teste, a custo de alta demanda de recursos computacionais. Neste caso, 4 partes da subamostra serão para treino e 1 para validação. Por meio deste procedimento, é possível efetuar cálculos como média e desvio padrão, facilitando a análise de qualidade do modelo Qnesta configuração de hiperparâmetros.O melhor resultado entre os hiperparâmetros dos subgrupos será adotado para testa da base toda.
+
+
+ajuste_rpart  <- fit_resamples(modelo_hiperp, preparacao, resamples = crossval)
+ajuste_rpart |> collect_metrics()
+
+
+#***********************RESULTADOS TESTE COM HIPERPARÂMETROS E CROSSVALIDATION**************
+
+#accuracy	0.92
+#kap	0.50
+
+#*************************************************************************
+
+
+```
+
+
+```{r}
+
+fit_modelo <- decision_tree(mode = "classification", 
+                           engine = "rpart",
+                           cost_complexity = tune(), #hiperparametros, mínimo. Só será aplicado se servir para mitigar o risco de erros e reduzir o tamanho da árvore.
+                           min_n = tune()) #número mínimo de exemplos para definir uma classificação
+
+grade_parametros <- grid_regular(cost_complexity(), min_n())
+
+#Aplicação do modelo na base de teste com cross validation base de treino
+wf <- workflow() |> add_model(fit_modelo) |> add_formula(aeronave_fatalidades_total ~ . )
+crossval <- vfold_cv(dados_treino, v = 5)
+grade_ajustada <- tune_grid(wf, resamples = crossval, grid = grade_parametros)
+
+# Tuning results
+# 5-fold cross-validation 
+
+melhor_wf <- select_best(grade_ajustada, metric = "accuracy")
+melhor_wf <- wf |> finalize_workflow(melhor_wf)
+
+# 
+# #══ Workflow ═══════════════════════════════════════════════════════════════════════════════════════
+# Preprocessor: Formula
+# Model: decision_tree()
+# 
+# ── Preprocessor ───────────────────────────────────────────────────────────────────────────────────
+# aeronave_fatalidades_total ~ .
+# 
+# ── Model ──────────────────────────────────────────────────────────────────────────────────────────
+# Decision Tree Model Specification (classification)
+# 
+# Main Arguments:
+#   cost_complexity = 0.1
+#   min_n = 2
+# 
+# Computational engine: rpart 
+
+ajuste_final <- melhor_wf |> last_fit(data_split)
+ajuste_final |> collect_metrics()
+
+
+
+#***********************RESULTADOS TESTE COM O MELHOR WORKFLOW PELO TUNE**************
+
+# accuracy 0.9515738
+# roc_auc 0.7559330
+
+#*************************************************************************
+
+```
+ 
+
+
+quit()
+
+
